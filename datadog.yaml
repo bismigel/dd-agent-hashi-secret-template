@@ -1,26 +1,29 @@
-# Datadog API key retrieved from Vault using native integration
+# Datadog Agent with the native HashiCorp Vault secret backend.
+#
+# Native Vault support is built into the Agent (7.70+). This template pins
+# 7.85.0, which also supports runtime refresh of secrets used by file-based
+# checks (7.76+).
+
 api_key: ENC[/secret/datadog;api_key]
-
-# Update to your Datadog site (datadoghq.com, us5.datadoghq.com, datadoghq.eu, etc.)
 site: us5.datadoghq.com
-
 hostname: dd-agent-hashi-secret
 
-# Native HashiCorp Vault integration (Datadog Agent v7.32.0+)
-# Working configuration with token authentication
 secret_backend_type: hashicorp.vault
 secret_backend_config:
   vault_address: http://vault:8200
-  vault_token: root  # Literal token value (also requires /etc/datadog-agent/auth_token file)
+  # Dev/demo only. For production use vault_session (Kubernetes/AppRole), or
+  # set implicit_auth: "true" and provide VAULT_TOKEN in the environment.
+  vault_token: root
 
-# Logging
-log_level: DEBUG
+# Refresh resolved secrets without restarting the Agent. Without this, a
+# rotated Vault secret is only picked up on restart.
+secret_refresh_interval: 60
 
-# Enable checks
-process_agent_enabled: true
-trace_agent_enabled: true
+log_level: INFO
 
-# Listen on all interfaces
+# The process/trace agents need extra host privileges and are not relevant to
+# the Vault integration.
+process_agent_enabled: false
+trace_agent_enabled: false
+
 bind_host: 0.0.0.0
-
-# Additional configs can be placed in conf.d/

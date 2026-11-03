@@ -1,269 +1,250 @@
-# Datadog Agent with Native HashiCorp Vault Secret Management
+# Datadog Agent + Native HashiCorp Vault
 
-A minimal, production-ready template demonstrating native HashiCorp Vault integration with Datadog Agent. This template uses Datadog Agent's built-in secret backend for secure credential management.
+A minimal, working template for the Datadog Agent's **native**
+`hashicorp.vault` secret backend.
 
-> **Key Discovery**: Native Vault integration **does support token authentication** (contrary to documentation that only shows AWS IAM).
+Vault holds the credentials. The Agent resolves `ENC[...]` handles itself, and
+the resolved credentials are used by an `http_check` against the status-api
+basic-auth endpoint (`/api/detail`). No custom secret-backend script is needed.
 
-## Features
+Verified with:
 
-- **Native Secret Management**: Uses Datadog Agent's built-in `secret_backend_type: hashicorp.vault`
-- **Token Authentication**: Works with Vault token authentication (not just AWS IAM)
-- **KV v2 Support**: Compatible with Vault's KV v2 secrets engine
-- **Minimal Configuration**: No custom scripts or external dependencies
-- **Containerized**: Docker Compose with version-pinned components
-- **Production-Ready**: Follows Datadog's official secret management patterns
+- Datadog Agent **7.85.0**
+- HashiCorp Vault **1.21.2** (dev mode)
+- status-api (public GHCR image)
 
-## Prerequisites
-
-- Docker 20.10+ and Docker Compose
-- Datadog API key (for production use)
-- User in `docker` group or `sudo` access
+> See [learnings.md](learnings.md) for the tested behavior, version differences,
+> and gotchas. The old `auth_token`/7.74.1 workaround is gone.
 
 ## Architecture
 
-```
-+-------------------+     +-------------------+     +-------------------+
-|   Datadog Agent   |<--->|  HashiCorp Vault  |<--->|   Secret Storage  |
-|  (v7.74.1)        |     |  (v1.21.2)        |     |   (KV v2 Engine)  |
-|                   |     |                   |     |                   |
-|  Native Vault     |     |  Dev Server       |     |  - API Key        |
-|  Integration      |     |  - Token Auth     |     |  - HTTP Creds     |
-+-------------------+     +-------------------+     +-------------------+
+```text
++-------------------+        +-------------------+        +------------------+
+|   Datadog Agent   |<------>|  HashiCorp Vault  |<------>|   KV v2 secrets  |
+|  7.85.0           | native |  1.21.2 (dev)     |        | datadog,         |
+|                   | backend|                   |        | http_check       |
++---------+---------+        +-------------------+        +------------------+
+          |
+          | http_check with Vault-provided basic auth
+          v
++-------------------+
+|    status-api     |
+| /api/detail       |  401 without creds, 200 with them
++-------------------+
 ```
 
-## Quick Start
-
-### 1. Clone and Setup
+## Quick start
 
 ```bash
-git clone <your-repo>
-cd dd-agent-hashi-secret-template
-
-# Copy environment template
 cp .env.example .env
-```
+# Optional: put a real Datadog API key in .env. A dummy key is fine for tests.
 
-### 2. Configure Secrets
+docker compose up --build -d
 
-Update `.env` with your Datadog API key:
-```bash
-# .env
-DD_API_KEY=your_actual_datadog_api_key_here
-```
+# status-api basic auth
+curl -i http://localhost:8080/api/detail                       # 401
+curl -i -u testuser:testpass http://localhost:8080/api/detail  # 200
 
-Create Vault token file:
-```bash
-mkdir -p secrets
-echo "root" > secrets/auth_token  # For development only
-chmod 666 secrets/auth_token  # Allow container to write to the file
-```
-
-### 3. Deploy Services
-
-```bash
-docker-compose up -d --build
-```
-
-### 4. Verify Deployment
-
-```bash
-# Check Datadog Agent status
+# Agent status
 docker exec datadog-agent agent status
 
-# Verify Vault connectivity
-curl http://localhost:8200/v1/sys/health
-
-# View logs
-docker-compose logs -f datadog-agent
+# Verify the whole template
+./verify-setup.sh
 ```
 
-## Configuration
+## What this proves
 
-### Native Vault Integration (`datadog.yaml`)
+- The Agent reads the Datadog API key and the status-api credentials from Vault.
+- The `http_check` reaches status-api with `200` using those credentials.
+- Removing/altering the Vault secret makes the check fail (`401`).
+- Restoring the secret makes the check recover, without restarting the Agent.
+- The Agent does **not** need an `auth_token` file to talk to Vault.
+
+## Vault layout
+
+`scripts/startup.sh` creates these KV v2 secrets **only if they are missing**:
+
+| Path | Keys |
+| --- | --- |
+| `secret/datadog` | `api_key` |
+| `secret/http_check` | `username=testuser`, `password=testpass` |
+
+Because existing secrets are left alone, rotating a secret in Vault survives an
+Agent restart.
+
+## Native Agent configuration
+
+`datadog.yaml`:
 
 ```yaml
-# Datadog API key retrieved from Vault
 api_key: ENC[/secret/datadog;api_key]
 
-# Native HashiCorp Vault integration
 secret_backend_type: hashicorp.vault
 secret_backend_config:
   vault_address: http://vault:8200
-  vault_token: root  # Token can be literal or file path
+  vault_token: root   # dev only
+
+secret_refresh_interval: 60
 ```
 
-### Required File Artifact
+`conf.d/http_check.yaml`:
 
-The Agent requires `/etc/datadog-agent/auth_token` file for security:
 ```yaml
-# In docker-compose.yml
-volumes:
-  - ./secrets/auth_token:/etc/datadog-agent/auth_token
+instances:
+  - name: status-api detail (Vault basic auth)
+    url: http://status-api:8080/api/detail
+    username: ENC[/secret/http_check;username]
+    password: ENC[/secret/http_check;password]
 ```
 
-**Important**: The Agent needs write access to this file for security artifact validation. Ensure the file exists and has proper permissions:
+Secret handle format is `ENC[/mount/path;key]`. The native backend supports KV
+v1 and v2.
+
+### `auth_token` is not the Vault token
+
+`/etc/datadog-agent/auth_token` is the Agent's **IPC auth token**. The Agent
+creates it automatically with a random value. It is not the Vault token, and
+this template does not mount or pre-create it.
+
+`vault_token` is a **literal static token**, not a file path.
+
+## Vault policy for KV v2
+
+```hcl
+path "secret/data/*" {
+  capabilities = ["read"]
+}
+
+# The Agent reads mount information to detect the KV engine version.
+# Without this, it assumes KV v1 and KV v2 reads fail.
+path "sys/mounts" {
+  capabilities = ["read"]
+}
+```
+
+## Secret rotation
+
+`secret_refresh_interval` makes the Agent re-resolve secrets without a restart.
+Runtime refresh of secrets used by file-based checks is available in Agent
+7.76+. This template pins 7.85.0.
+
+Manual check:
+
 ```bash
-mkdir -p secrets
-echo "root" > secrets/auth_token  # Use your actual Vault token in production
-chmod 666 secrets/auth_token  # Allow container to write to the file
-```
+# Keep debug logs on so the http_check request lines are visible.
+DD_LOG_LEVEL=debug docker compose up -d datadog-agent
 
-### Secret References
+docker exec -e VAULT_ADDR=http://vault:8200 -e VAULT_TOKEN=root vault \
+  vault kv put secret/http_check username=testuser password=wrongpass
+sleep 75
+docker logs datadog-agent 2>&1 | grep 'GET /api/detail.*401'
 
-Secrets are referenced using Datadog's native format:
-- API Key: `ENC[/secret/datadog;api_key]`
-- HTTP Check Credentials: `ENC[/secret/http_check;username]`, `ENC[/secret/http_check;password]`
-
-### Vault Secrets Structure (KV v2)
-
-```
-secret/
-├── datadog/
-│   └── data/
-│       └── api_key: "your_datadog_api_key"
-└── http_check/
-    └── data/
-        ├── username: "testuser"
-        └── password: "testpass"
+docker exec -e VAULT_ADDR=http://vault:8200 -e VAULT_TOKEN=root vault \
+  vault kv put secret/http_check username=testuser password=testpass
+sleep 75
+docker logs datadog-agent 2>&1 | grep 'GET /api/detail.*200'
 ```
 
 ## Verification
 
 ```bash
-# Check Agent status with native Vault integration
-docker exec datadog-agent agent status
-
-# Verify configuration
-docker exec datadog-agent agent configcheck
-
-# Test secret resolution
-docker exec datadog-agent agent secret-helper /secret/datadog;api_key
-
-# View logs for secret backend operations
-docker-compose logs datadog-agent | grep -i vault
+./verify-setup.sh
 ```
 
-## Production Considerations
+The script checks:
 
-### Security
-**This template uses Vault in development mode (`-dev`) with insecure settings:**
-- No TLS/SSL (HTTP only)
-- Pre-generated root token (`root`)
-- In-memory storage (data lost on container restart)
+- required files
+- Docker/Compose availability
+- Vault health
+- status-api `401` without credentials and `200` with credentials
+- Agent response and native backend config
+- the `status-api detail (Vault basic auth)` check instance
 
-### Production Recommendations
-1. Use Production Vault: Deploy a production Vault cluster with TLS, persistent storage, and proper authentication
-2. Rotate Tokens: Replace root token with limited-privilege token
-3. Enable TLS: Update `vault_address` to `https://` and configure certificates
-4. Network Security: Isolate Vault on internal network
-5. Monitoring: Add health checks and alerting for both Vault and Datadog Agent
+## Production notes
 
-### Authentication Methods
-The template uses token authentication. For production, consider:
-- AWS IAM: `vault_auth_type: aws` with instance profiles
-- Kubernetes: `vault_auth_type: kubernetes` with service accounts
-- AppRole: Standard machine-to-machine authentication
+The compose setup uses Vault `-dev` mode with a root token. Do not use it in
+production.
 
-## Project Structure
+### Authentication
 
+Kubernetes (recommended when Vault and the Agent are in Kubernetes):
+
+```yaml
+secret_backend_type: hashicorp.vault
+secret_backend_config:
+  vault_address: https://vault.example.com:8200
+  vault_session:
+    vault_auth_type: kubernetes
+    vault_kubernetes_role: datadog-agent
 ```
-.
-├── docker-compose.yml          # Service definitions (Vault + Datadog Agent)
-├── Dockerfile                  # Datadog Agent with startup script
-├── datadog.yaml               # Main Datadog configuration with native Vault
 
-├── conf.d/http_check.yaml     # HTTP check with Vault secrets
-├── secrets/                   # Secret files directory
-│   ├── .gitkeep              # Keep directory structure
-│   └── auth_token            # Vault token file (required, gitignored)
-├── scripts/                  # Utility scripts
-│   ├── startup.sh            # Agent startup script
+AppRole (when Kubernetes auth is not available):
 
-├── .env.example              # Environment template
-├── .env                      # Environment variables (gitignored)
-├── .gitignore               # Git ignore rules
-├── learnings.md             # Comprehensive documentation
-
-└── LICENSE                  # MIT License
+```yaml
+secret_backend_config:
+  vault_address: https://vault.example.com:8200
+  vault_session:
+    vault_role_id: <role-id>
+    vault_secret_id: <secret-id>
 ```
+
+Environment-based token (dev/simple deployments):
+
+```yaml
+secret_backend_config:
+  vault_session:
+    implicit_auth: "true"
+```
+
+with `VAULT_ADDR` and `VAULT_TOKEN` in the environment. On Agent 7.85.0 the
+value must be the string `"true"`; a YAML boolean (`true`) fails with an
+`expected type 'string'` error.
+
+### TLS
+
+```yaml
+secret_backend_config:
+  vault_address: https://vault.example.com:8200
+  vault_tls_config:
+    ca_cert: /etc/datadog-agent/certs/ca.pem
+    client_cert: /etc/datadog-agent/certs/client.pem
+    client_key: /etc/datadog-agent/certs/client-key.pem
+```
+
+### Agent version
+
+- Native Vault backend: Agent 7.70+
+- Runtime refresh for check secrets: Agent 7.76+
+- This template pins `datadog/agent:7.85.0`
+
+## Migration notes
+
+This template previously pinned Agent 7.74.1 and required a
+`secrets/auth_token` file plus `chmod 666`. That was a workaround for the
+Agent's IPC auth token, not Vault authentication. The current template:
+
+- pins 7.85.0
+- removes the `auth_token` mount and `chmod 666`
+- uses `hashicorp/vault:1.21.2` instead of the nonexistent `vault:latest`
+- adds `secret_refresh_interval: 60`
+- makes `startup.sh` idempotent
+- uses status-api `/api/detail` as the basic-auth target
+- does not overwrite rotated secrets on restart
 
 ## Troubleshooting
 
-### Common Issues
-
-**Vault Token Authentication Issues:**
-```bash
-# Verify auth_token file exists and is mounted
-docker exec datadog-agent ls -la /etc/datadog-agent/auth_token
-
-# Check Vault logs for authentication errors
-docker-compose logs vault | grep -i token
-```
-
-**Secret Retrieval Issues:**
-```bash
-# Verify secret format
-grep "ENC\[" datadog.yaml conf.d/http_check.yaml
-# Should show: ENC[/secret/datadog;api_key] format
-
-# Check Vault secret existence
-docker exec vault vault kv get secret/datadog
-```
-
-**Datadog Agent Fails to Start:**
-```bash
-# Check logs
-docker-compose logs datadog-agent
-
-# Verify Vault is healthy
-curl http://localhost:8200/v1/sys/health
-```
-
-### Logs and Diagnostics
-
-```bash
-# View all logs
-docker-compose logs
-
-# Follow Datadog Agent logs
-docker-compose logs -f datadog-agent
-
-# Check agent status
-docker exec datadog-agent agent status
-
-# Test secret retrieval
-docker exec datadog-agent agent configcheck
-```
-
-## Monitoring
-
-The Datadog Agent automatically monitors:
-- System metrics (CPU, memory, disk, network)
-- Container metrics (if Docker socket mounted)
-- Custom HTTP checks (configured in `conf.d/`)
-- Vault health (via HTTP check to `localhost:8200`)
-
-Add additional checks by creating files in `conf.d/` directory.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with descriptive commit messages
-4. Test thoroughly
-5. Submit a pull request
-
-## License
-
-MIT License - see [LICENSE](LICENSE) file for details.
+| Symptom | Cause / fix |
+| --- | --- |
+| `could not resolve secret handle(s)` | Check `VAULT_TOKEN`, `vault_address`, the path/key in `ENC[...]`, and that the Agent can reach Vault. |
+| `Invalid path for a versioned K/V secrets engine` | The Agent assumed KV v1. Grant `read` on `sys/mounts`. |
+| status-api returns `401` in the check | The Vault credentials are wrong, or the Agent has not refreshed them yet. Check `secret_refresh_interval`. |
+| Rotation is not picked up | Agent older than 7.76, or `secret_refresh_interval` is not set. |
+| `expected type 'string'` for `implicit_auth` | Use `implicit_auth: "true"` (quoted) on 7.85.0. |
+| Vault container is unhealthy | Use the `hashicorp/vault` image and a `wget` healthcheck; the image does not have `curl`. |
 
 ## References
 
-- [Datadog Secret Management Documentation](https://docs.datadoghq.com/agent/configuration/secrets-management/)
-- [HashiCorp Vault Documentation](https://www.vaultproject.io/docs)
-- [Datadog Agent Docker Image](https://hub.docker.com/r/datadog/agent)
-- [Native HashiCorp Vault Integration](https://docs.datadoghq.com/agent/configuration/secrets-management/?tab=agentyamlfile#hashicorp-vault-backend)
-
----
-
-**Note**: Replace placeholder values in `.env`, secrets files, and configuration files before production use. See [learnings.md](learnings.md) for detailed technical documentation.
+- [Datadog Secrets Management](https://docs.datadoghq.com/agent/configuration/secrets-management/)
+- [HashiCorp Vault documentation](https://developer.hashicorp.com/vault/docs)
+- [Datadog Agent image](https://hub.docker.com/r/datadog/agent)
+- [learnings.md](learnings.md) — tested behavior and gotchas

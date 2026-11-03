@@ -1,9 +1,8 @@
-# HTTP check configuration with Vault secrets
-# Update the 'url' field to point to your actual service
-# Credentials are retrieved from Vault using native integration
+# Basic-auth check against status-api. Credentials come from Vault via the
+# Agent's native hashicorp.vault backend.
 instances:
-  - name: Secure Service Health Check
-    url: http://test-server:8080  # Update this to your actual service URL
+  - name: status-api detail (Vault basic auth)
+    url: http://status-api:8080/api/detail
     timeout: 10
     username: ENC[/secret/http_check;username]
     password: ENC[/secret/http_check;password]
@@ -12,4 +11,4 @@ instances:
       User-Agent: Datadog Agent/1.0
     tags:
       - env:demo
-      - service:example
+      - service:status-api

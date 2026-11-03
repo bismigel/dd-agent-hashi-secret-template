@@ -1,100 +1,97 @@
-#!/bin/bash
-# verify-setup.sh - Simple verification script for Datadog Agent with Vault integration
+#!/usr/bin/env bash
+# Verify the Datadog Agent + native HashiCorp Vault template.
+set -euo pipefail
 
-set -e
+cd "$(dirname "$0")"
 
-echo "🔍 Verifying Datadog Agent with Vault integration setup..."
+if docker compose version >/dev/null 2>&1; then
+  COMPOSE=(docker compose)
+else
+  COMPOSE=(docker-compose)
+fi
 
-# Check required files exist
-echo "📁 Checking configuration files..."
+echo "CHECK: Verifying Datadog Agent + native HashiCorp Vault setup..."
+
 required_files=(
-    "docker-compose.yml"
-    "Dockerfile"
-    "datadog.yaml"
-    ".env.example"
-    "secrets/auth_token"
+  "docker-compose.yml"
+  "Dockerfile"
+  "datadog.yaml"
+  "conf.d/http_check.yaml"
+  "status-api-checks.json"
+  ".env.example"
 )
 
 for file in "${required_files[@]}"; do
-    if [ -f "$file" ]; then
-        echo "  ✅ $file"
-    else
-        echo "  ❌ $file (missing)"
-        exit 1
-    fi
+  if [ -f "$file" ]; then
+    echo "  [OK] $file"
+  else
+    echo "  [FAIL] $file (missing)"
+    exit 1
+  fi
 done
 
-# Check auth_token file permissions
-if [ -f "secrets/auth_token" ]; then
-    echo "🔒 Checking auth_token file permissions..."
-    perms=$(stat -c "%a" "secrets/auth_token" 2>/dev/null || stat -f "%p" "secrets/auth_token" | sed 's/.*\(...\)/\1/')
-    if [[ "$perms" == *"66"* ]] || [[ "$perms" == *"77"* ]]; then
-        echo "  ✅ auth_token has proper permissions ($perms)"
-    else
-        echo "  ⚠️  auth_token may have restrictive permissions ($perms)"
-        echo "     Consider running: chmod 666 secrets/auth_token"
-    fi
+if [ ! -f .env ]; then
+  cp .env.example .env
+  echo "  WARN: .env created from .env.example (dummy Datadog key)"
 fi
 
-# Check if .env exists
-if [ ! -f ".env" ]; then
-    echo "⚠️  .env file not found, copying from .env.example"
-    cp .env.example .env
-    echo "  Please update .env with your Datadog API key"
+echo "DOCKER: Checking Docker..."
+if ! command -v docker >/dev/null 2>&1; then
+  echo "  [FAIL] docker not found"
+  exit 1
+fi
+echo "  [OK] docker"
+
+if [ -z "$("${COMPOSE[@]}" ps -q 2>/dev/null)" ]; then
+  echo "  INFO: Services are not running."
+  echo "     Start with: ${COMPOSE[*]} up --build -d"
+  exit 0
 fi
 
-# Check Docker availability
-echo "🐳 Checking Docker availability..."
-if command -v docker &> /dev/null; then
-    echo "  ✅ Docker is available"
-else
-    echo "  ❌ Docker not found"
-    exit 1
-fi
+echo "SERVICES: Checking services..."
+"${COMPOSE[@]}" ps
 
-# Check Docker Compose availability
-if command -v docker-compose &> /dev/null; then
-    echo "  ✅ Docker Compose is available"
-else
-    echo "  ❌ Docker Compose not found"
-    exit 1
-fi
+echo "VAULT: Checking Vault..."
+curl -fsS http://localhost:8200/v1/sys/health >/dev/null
+echo "  [OK] Vault is responding on localhost:8200"
 
-# Check if services are running
-echo "🚀 Checking running services..."
-if docker-compose ps | grep -q "Up"; then
-    echo "  ✅ Services are running"
-    
-    # Test Vault connectivity
-    echo "🔐 Testing Vault connectivity..."
-    if curl -s http://localhost:8200/v1/sys/health > /dev/null 2>&1; then
-        echo "  ✅ Vault is responding"
-    else
-        echo "  ❌ Vault not responding on localhost:8200"
-    fi
-    
-    # Test Datadog Agent
-    echo "📊 Testing Datadog Agent..."
-    if docker exec datadog-agent agent status > /dev/null 2>&1; then
-        echo "  ✅ Datadog Agent is running"
-    else
-        echo "  ❌ Datadog Agent not responding"
-    fi
-else
-    echo "  ℹ️  Services not running"
-    echo "  To start services: docker-compose up -d --build"
+echo "AUTH: Checking status-api basic auth..."
+code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/detail)
+if [ "$code" != "401" ]; then
+  echo "  [FAIL] expected 401 without credentials, got $code"
+  exit 1
 fi
+code=$(curl -s -o /dev/null -w '%{http_code}' -u testuser:testpass \
+  http://localhost:8080/api/detail)
+if [ "$code" != "200" ]; then
+  echo "  [FAIL] expected 200 with testuser:testpass, got $code"
+  exit 1
+fi
+echo "  [OK] 401 without credentials, 200 with Vault credentials"
 
-echo ""
-echo "📋 Summary:"
-echo "  - Configuration files: ✅"
-echo "  - Docker availability: ✅"
-echo "  - Services status: $(docker-compose ps | grep -q "Up" && echo "✅ Running" || echo "⚠️ Not running")"
-echo ""
-echo "🚀 Next steps:"
-echo "  1. Update .env with your Datadog API key"
-echo "  2. Run: docker-compose up -d --build"
-echo "  3. Check logs: docker-compose logs -f datadog-agent"
-echo "  4. Verify: docker exec datadog-agent agent status"
-echo ""
-echo "✅ Verification complete!"
+echo "AGENT: Checking the Datadog Agent..."
+docker exec datadog-agent agent status >/dev/null
+echo "  [OK] Agent is responding"
+docker exec datadog-agent grep -q 'secret_backend_type: hashicorp.vault' \
+  /etc/datadog-agent/datadog.yaml
+if docker exec datadog-agent grep -Eq '^[[:space:]]*secret_backend_command[[:space:]]*:' \
+  /etc/datadog-agent/datadog.yaml; then
+  echo "  [FAIL] datadog.yaml still uses the old secret_backend_command"
+  exit 1
+fi
+echo "  [OK] Native hashicorp.vault backend is configured"
+docker exec datadog-agent agent status | grep -q 'status-api detail (Vault basic auth)'
+echo "  [OK] status-api http_check instance is loaded"
+
+echo
+echo "[OK] Verification complete"
+echo
+echo "Rotation test (restart the Agent with DD_LOG_LEVEL=debug so the request"
+echo "lines are visible):"
+echo "  DD_LOG_LEVEL=debug ${COMPOSE[*]} up -d datadog-agent"
+echo "  docker exec -e VAULT_ADDR=http://vault:8200 -e VAULT_TOKEN=root vault \\"
+echo "    vault kv put secret/http_check username=testuser password=wrongpass"
+echo "  sleep 75"
+echo "  docker logs datadog-agent 2>&1 | grep 'GET /api/detail.*401'"
+echo "  docker exec -e VAULT_ADDR=http://vault:8200 -e VAULT_TOKEN=root vault \\"
+echo "    vault kv put secret/http_check username=testuser password=testpass"

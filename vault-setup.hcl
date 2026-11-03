@@ -1,3 +1,7 @@
+# Example non-dev Vault configuration.
+# The default docker-compose.yml uses `vault server -dev`, so this file is not
+# mounted by default. Use it as a starting point for a persistent Vault.
+
 storage "file" {
   path = "/vault/data"
 }
