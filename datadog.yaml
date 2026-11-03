@@ -5,6 +5,7 @@
 # checks (7.76+).
 
 api_key: ENC[/secret/datadog;api_key]
+# Must match your Datadog organization's region. DD_SITE overrides this.
 site: us5.datadoghq.com
 hostname: dd-agent-hashi-secret
 

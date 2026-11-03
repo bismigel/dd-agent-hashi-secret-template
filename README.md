@@ -60,6 +60,63 @@ docker exec datadog-agent agent status
 - Restoring the secret makes the check recover, without restarting the Agent.
 - The Agent does **not** need an `auth_token` file to talk to Vault.
 
+## Datadog site (region)
+
+This repo defaults to **US5**: `site: us5.datadoghq.com` and
+`DD_SITE=us5.datadoghq.com`. Set `DD_SITE` in `.env` to the region your
+Datadog organization uses:
+
+| Region | Site |
+| --- | --- |
+| US1 | `datadoghq.com` |
+| US3 | `us3.datadoghq.com` |
+| US5 | `us5.datadoghq.com` |
+| EU | `datadoghq.eu` |
+| AP1 | `ap1.datadoghq.com` |
+
+The API key must be from the same region. The site is visible in your Datadog
+URL, for example `app.us5.datadoghq.com` -> `us5.datadoghq.com`. When running
+the Agent outside Compose, also update `site:` in `datadog.yaml`.
+
+To send metrics to the real Datadog backend:
+
+1. Set a real API key and your site in `.env`:
+
+   ```bash
+   VAULT_DD_API_KEY=<real-api-key>
+   DD_SITE=<your-site>
+   ```
+
+2. Recreate the Agent so it picks up `DD_SITE`:
+
+   ```bash
+   docker compose up -d --force-recreate datadog-agent
+   ```
+
+3. Update the existing Vault secret. `startup.sh` only creates missing
+   secrets, so changing `.env` alone does not update an already-seeded key:
+
+   ```bash
+   set -a; . ./.env; set +a
+   docker exec -e VAULT_ADDR=http://vault:8200 -e VAULT_TOKEN=root vault \
+     vault kv put secret/datadog api_key="$VAULT_DD_API_KEY"
+   ```
+
+   Wait for `secret_refresh_interval` (60s) or restart the Agent.
+
+4. Check the Agent logs:
+
+   ```bash
+   docker logs datadog-agent 2>&1 | grep -i -E '403|invalid api key'
+   ```
+
+   No `403` means the key and site match.
+
+5. In Datadog, look for:
+   - `datadog.agent.running`
+   - `datadog.http_check.status` with `service:status-api`
+   - the `status-api detail (Vault basic auth)` service check
+
 ## Vault layout
 
 `scripts/startup.sh` creates these KV v2 secrets **only if they are missing**:
