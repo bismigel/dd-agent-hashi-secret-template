@@ -49,9 +49,6 @@ Thumbs.db
 # Test scripts and debug files
 tests/debug-scripts/
 
-# Secret files (keep directory with .gitkeep)
-secrets/*
-!secrets/.gitkeep
 
 # Log files
 *.log
