@@ -257,6 +257,11 @@ with `VAULT_ADDR` and `VAULT_TOKEN` in the environment. On Agent 7.85.0 the
 value must be the string `"true"`; a YAML boolean (`true`) fails with an
 `expected type 'string'` error.
 
+In the official Agent container, also set
+`DD_API_KEY=ENC[/secret/datadog;api_key]` in the pod environment. The s6
+entrypoint requires the variable before the Agent starts; the Agent then
+resolves it through Vault.
+
 ### TLS
 
 ```yaml

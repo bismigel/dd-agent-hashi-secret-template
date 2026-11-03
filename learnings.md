@@ -173,6 +173,31 @@ http://localhost:8080 "GET /api/detail HTTP/1.1" 401 13
 
 Set `DD_LOG_LEVEL=debug` for the test only; keep `INFO` in production.
 
+### 12. The Kubernetes/Docker Agent container still requires DD_API_KEY
+
+The upstream `datadog/agent` container's s6 entrypoint checks for `DD_API_KEY`
+before the Agent starts. Even with `api_key: ENC[...]` in `datadog.yaml`, the
+container exits with:
+
+```text
+You must set either a DD_API_KEY or DD_DELEGATED_AUTH_ORG_UUID environment
+variable to run the Datadog Agent container.
+```
+
+Set the environment variable to the same handle:
+
+```yaml
+env:
+  - name: DD_API_KEY
+    value: "ENC[/secret/datadog;api_key]"
+```
+
+The Agent resolves it through the configured secret backend. Verified on
+7.85.0 with Vault Kubernetes auth: the entrypoint passed and the Agent resolved
+the key from Vault. A real API key still has to match the configured Datadog
+site; a dummy key produces the expected 403 from Datadog but does not affect
+the Vault-backed `http_check`.
+
 ## Recommended configs
 
 ### Dev / demo
