@@ -247,6 +247,12 @@ vault write auth/kubernetes/role/datadog-agent \
   ttl=1h
 ```
 
+For the official `datadog/datadog` Helm chart, the same settings go under
+`datadog.secretBackend`. The chart's ServiceAccount name depends on
+`fullnameOverride`; the companion repo uses `fullnameOverride: dd-agent`, so
+the Vault role binds `dd-agent` instead of `datadog-agent`. See
+[datadog-vault-k8s-template](https://github.com/bismigel/datadog-vault-k8s-template).
+
 ### AppRole
 
 ```yaml
@@ -281,6 +287,10 @@ The native configuration in this template was verified end to end:
   least-privilege policies.
 
 ## References
+
+- [datadog-vault-k8s-template](https://github.com/bismigel/datadog-vault-k8s-template) - official Helm chart version
+- [Official Datadog Helm chart](https://github.com/DataDog/helm-charts/tree/main/charts/datadog)
+
 
 - [Datadog Secrets Management](https://docs.datadoghq.com/agent/configuration/secrets-management/)
 - [HashiCorp Vault docs](https://developer.hashicorp.com/vault/docs)

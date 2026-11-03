@@ -235,6 +235,13 @@ secret_backend_config:
     vault_kubernetes_role: datadog-agent
 ```
 
+> **Kubernetes/Helm:** use the official `datadog/datadog` Helm chart's
+> `datadog.secretBackend` values rather than copying this `datadog.yaml`
+> snippet. See the companion repo
+> [datadog-vault-k8s-template](https://github.com/bismigel/datadog-vault-k8s-template).
+> The Vault role must bind the actual Agent ServiceAccount; with the official
+> chart and `fullnameOverride: dd-agent`, that is `dd-agent`.
+
 AppRole (when Kubernetes auth is not available):
 
 ```yaml
@@ -305,6 +312,10 @@ Agent's IPC auth token, not Vault authentication. The current template:
 | Vault container is unhealthy | Use the `hashicorp/vault` image and a `wget` healthcheck; the image does not have `curl`. |
 
 ## References
+
+- [datadog-vault-k8s-template](https://github.com/bismigel/datadog-vault-k8s-template) - official Helm chart version
+- [Official Datadog Helm chart](https://github.com/DataDog/helm-charts/tree/main/charts/datadog)
+
 
 - [Datadog Secrets Management](https://docs.datadoghq.com/agent/configuration/secrets-management/)
 - [HashiCorp Vault documentation](https://developer.hashicorp.com/vault/docs)
